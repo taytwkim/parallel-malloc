@@ -4,6 +4,9 @@
 #include <stddef.h>
 #include <unistd.h>
 #include <string.h>
+#include <stdio.h>
+
+const int DEBUG = 1;
 
 #ifndef MYALLOC_REGION_SIZE
 #define MYALLOC_REGION_SIZE (64ULL * 1024ULL * 1024ULL)
@@ -30,19 +33,17 @@ typedef struct free_links {
 } free_links_t;
 
 typedef struct free_chunk {
-    size_t       size_and_flags;    // total size (incl header; footer exists only when free)
-    free_links_t links;             // valid only when free (lives at start of payload)
+    size_t size_and_flags;    // total size (incl header; footer exists only when free)
+    free_links_t links;       // valid only when free (lives at start of payload)
 } free_chunk_t;
 
-/* CHUNK_FREE_BIT = mask for the last bit (000...001)
- *    - header | CHUNK_FREE_BIT → mark FREE
- *    - header & ~CHUNK_FREE_BIT → mark USED
- * 
- * CHUNK_SIZE_MASK clears the low 4 flag bits (…FFF0).
- *    - header & CHUNK_SIZE_MASK → size
- */
-
+ // CHUNK_FREE_BIT = mask for the last bit (000...001)
+ //   - header | CHUNK_FREE_BIT → mark FREE
+ //   - header & ~CHUNK_FREE_BIT → mark USED
 #define CHUNK_FREE_BIT ((size_t)1)
+
+// CHUNK_SIZE_MASK clears the low 4 flag bits (…FFF0)
+//    - header & CHUNK_SIZE_MASK → size
 #define CHUNK_SIZE_MASK (~(size_t)0xFUL)
 
 static inline size_t get_size_from_hdr(size_t hdr) { return hdr & CHUNK_SIZE_MASK; } // get chunk size from header
@@ -81,10 +82,11 @@ static inline size_t get_min_free_chunk_size(void) {
 static uint8_t      *g_base = NULL;         // start of mmapped region
 static uint8_t      *g_bump = NULL;         // unexplored region to carve out from
 static uint8_t      *g_end  = NULL;         // one past end of the mmaped region
-static free_chunk_t *g_free_list = NULL;     // head of doubly-linked free list
+static free_chunk_t *g_free_list = NULL;    // head of doubly-linked free list
 
 static void myalloc_init(void) {
     // mmap a memory region to intialize the arena
+    if (DEBUG) printf("[alloc_init] entered\n");
 
     if (g_base) return; // we want to initialize only once
 
@@ -99,6 +101,8 @@ static void myalloc_init(void) {
     g_bump = g_base;
     g_end  = g_base + req;
     g_free_list = NULL; // start with empty freelist; carve on demand
+
+    if (DEBUG) printf("[alloc_init] initialized arena: base=%p, end=%p, bump=%p\n", g_base, g_end, g_bump);
 }
 
 static inline void* get_prev_chunk_if_free(void *hdr, int *prev_is_free) {
@@ -246,6 +250,8 @@ static void* coalesce(void *hdr) {
 
 // ===== Malloc API =====
 void *my_malloc(size_t size) {
+    if (DEBUG) printf("[malloc] entered: req=%zu\n", size);
+
     if (!g_base) myalloc_init();
 
     if (!g_base) return NULL;
@@ -255,14 +261,32 @@ void *my_malloc(size_t size) {
     size_t payload = align16(size);
     size_t need = align16(sizeof(size_t) + payload); // header + payload
 
+    if (DEBUG) printf("[malloc] aligned: payload=%zu (from %zu), needed_size=%zu\n", payload, size, need);
+
     void *hdr = try_free_list(need);  // Try free list
 
     if (!hdr) {
-        // if we weren't able to find a suitable chunk from the free list, carve chunk from the unexplored region
-        hdr = carve_from_top(need);
-        if (!hdr) return NULL; // out of arena
-    }
+        if (DEBUG) printf("[malloc] freelist miss; carve from top; bump=%p\n", (void*) g_bump);
 
+        // if we weren't able to find a suitable chunk from the free list, carve chunk from top
+        hdr = carve_from_top(need);
+
+        if (!hdr) return NULL; // out of arena
+
+        if (DEBUG) { 
+            uint8_t *payload_ptr = get_payload_from_header(hdr);
+            uint8_t *chunk_end = (uint8_t*)hdr + get_chunk_size(hdr);
+            printf("[malloc] from-top: hdr=%p  payload=%p  end=%p  size=%zu  aligned=%d\n", hdr, payload_ptr, chunk_end, get_chunk_size(hdr), ((uintptr_t)payload_ptr & 15u) == 0);
+        }
+    }
+    else {
+        if (DEBUG) {
+            uint8_t *payload_ptr = get_payload_from_header(hdr);
+            uint8_t *chunk_end = (uint8_t*)hdr + get_chunk_size(hdr);
+            printf("[malloc] from-free-list: hdr=%p  payload=%p  end=%p  size=%zu  aligned=%d\n", hdr, payload_ptr, chunk_end, get_chunk_size(hdr), ((uintptr_t)payload_ptr & 15u) == 0);
+        }
+    }
+    
     return get_payload_from_header(hdr);
 }
 
