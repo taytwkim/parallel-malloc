@@ -1,4 +1,4 @@
-#define _DARWIN_C_SOURCE
+// #define _DARWIN_C_SOURCE
 #include <sys/mman.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -6,17 +6,28 @@
 #include <string.h>
 #include <stdio.h>
 
-const int DEBUG = 0;
+const int DEBUG = 0;    // verbose logs
 
 #ifndef MYALLOC_REGION_SIZE
 #define MYALLOC_REGION_SIZE (64ULL * 1024ULL * 1024ULL)
 #endif
 
-static inline size_t align16(size_t n) { return (n + 15u) & ~((size_t)15u); }   // return n rounded up to the next multiple of 16
+// ===== Helpers =====
 
+/* Round up n to the next multiple of 16 (bytes)
+ *
+ * Why do we align to 16 bytes?
+ * The hardware (or the compiler) expects addresses to be multiples of certain size.
+ *  - char    → 1-byte alignment (can start anywhere)
+ *  - int     → 4-byte alignment (address multiple of 4)
+ *  - double  → 8-byte alignment (address multiple of 8) ... and so on.
+ * 
+ * So aligning by 16 is a good default.
+ */
+static inline size_t align16(size_t n) { return (n + 15u) & ~((size_t)15u); } 
 static inline size_t pagesize(void) { return (size_t)getpagesize(); }           // return the OS page size
 
-// ===== Chunk Layout =====
+// ===== Chunk =====
 
 /* In-use:    [ header (size | flags) ]       8 bytes (in a 64 bit machine), the last four bits are flags
  *            [ payload ... ]
@@ -25,7 +36,11 @@ static inline size_t pagesize(void) { return (size_t)getpagesize(); }           
  *            [ fd ]                          8 bytes, forward pointer to the next free chunk
  *            [ bk ]                          8 bytes, backward pointer to the prev free chunk
  *            ... 
- *            [ footer (size | flags) ]       8 bytes, same as the header
+ *            [ footer (size | flags) ]       8 bytes, same as the header, but CHUNK_PREV_IN_USE_BIT is not actively updated
+ * 
+ * flags: 
+ *    - bit 0: CHUNK_FREE_BIT
+ *    - bit 1: CHUNK_PREV_IN_USE_BIT
  */
 
 typedef struct free_links { 
@@ -43,10 +58,12 @@ static uint8_t      *g_bump = NULL;         // unexplored region to carve out fr
 static uint8_t      *g_end  = NULL;         // one past end of the mmaped region
 static free_chunk_t *g_free_list = NULL;    // head of doubly-linked free list
 
-#define OFF(P) ((int)((uintptr_t)(P) - (uintptr_t)g_base))    // offset from g_base; for debugging
+#define OFF(P) ((int)((uintptr_t)(P) - (uintptr_t)g_base))    // offset from g_base - for debugging
 
 static void myalloc_init(void) {
-    // mmap a memory region to intialize the arena
+    /* mmap a large memory region and initialize the arena
+     * called only once at the beginning
+     */
     
     if (DEBUG) printf("[alloc_init] entered\n");
 
@@ -54,7 +71,7 @@ static void myalloc_init(void) {
 
     size_t req = MYALLOC_REGION_SIZE;
     size_t ps  = pagesize();
-    if (req % ps) req += ps - (req % ps); // round the requested size up to OS page size
+    if (req % ps) req += ps - (req % ps); // round the requested size up to OS page size (mmap maps whole pages)
 
     void *mem = mmap(NULL, req, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (mem == MAP_FAILED) return;
@@ -68,7 +85,8 @@ static void myalloc_init(void) {
 }
 
 // ===== Chunk Flags and Masks =====
-// CHUNK_SIZE_MASK clears the low 4 flag bits (…FFF0)
+
+// CHUNK_SIZE_MASK clears the flag bits (…FFF0)
 //    - header & CHUNK_SIZE_MASK → size
 #define CHUNK_SIZE_MASK (~(size_t)0xFUL)
 
@@ -81,19 +99,20 @@ static void myalloc_init(void) {
  *   - Set  : header |=  CHUNK_PREV_IN_USE_BIT → previous chunk is IN-USE
  *   - Clear: header &= ~CHUNK_PREV_IN_USE_BIT → previous chunk is FREE
  * 
- * Why do we need this flag?
+ * Why do we keep this flag?
  * We need this flag when merging two chunks. When a chunk is freed, we look at its left neighbor and try to merge.
- * But we want to first make sure that the left chunk is free. If we read from the left chunk's footer without checking, 
- * we might be reading from the payload of a chunk that is currently in-use.
+ * But we want to first make sure that the left chunk is really free. If we read from the left chunk's footer without checking, 
+ * we might be reading from the payload of an in-use chunk.
+ * This is not really a problem when merging with the right chunk, because both free and in-use chunks have
  */
 #define CHUNK_PREV_IN_USE_BIT ((size_t)2)
 
-// ===== Chunk Header & Footer Ops =====
+// ===== Header & Footer Ops =====
 static inline size_t get_size_from_hdr(size_t hdr) { return hdr & CHUNK_SIZE_MASK; }
 static inline int get_free_bit_from_hdr(size_t hdr) { return (int)(hdr & CHUNK_FREE_BIT); }
-// static inline int get_prev_in_use_bit_from_hdr(size_t hdr_word) { return (int)(hdr_word & CHUNK_PREV_IN_USE_BIT); }
+static inline int get_prev_in_use_bit_from_hdr(size_t hdr_word) { return (int)(hdr_word & CHUNK_PREV_IN_USE_BIT); }
 
-static inline void set_prev(void *hdr, int on) {
+static inline void set_prev_bit_in_hdr(void *hdr, int on) {
     size_t h = *(size_t*)hdr;
     if (on)  h |=  CHUNK_PREV_IN_USE_BIT;
     else     h &= ~CHUNK_PREV_IN_USE_BIT;
@@ -124,12 +143,12 @@ static inline void* get_hdr_from_payload(void *ptr) { return (uint8_t*)ptr - siz
 // ===== Chunk Ops =====
 static inline size_t get_chunk_size(void *hdr) { return get_size_from_hdr(*(size_t*)hdr); }
 static inline int chunk_is_free(void *hdr) { return get_free_bit_from_hdr(*(size_t*)hdr); }
-// static inline int prev_chunk_is_free(void *hdr) { return !get_prev_in_use_bit_from_hdr(*(size_t*)hdr); }
-static inline void* get_next_chunk(void *hdr) { return (uint8_t*)hdr + get_chunk_size(hdr); }
+static inline int prev_chunk_is_free(void *hdr) { return !get_prev_in_use_bit_from_hdr(*(size_t*)hdr); }
+static inline void* get_next_chunk_hdr(void *hdr) { return (uint8_t*)hdr + get_chunk_size(hdr); }
 
-static inline void set_prev_in_next_chunk(void *hdr, int prev_in_use) {
-    void *nxt = get_next_chunk(hdr);
-    if ((uint8_t*)nxt < g_bump) set_prev(nxt, prev_in_use);
+static inline void set_prev_bit_in_next_chunk_hdr(void *hdr, int prev_in_use) {
+    void *nxt = get_next_chunk_hdr(hdr);
+    if ((uint8_t*)nxt < g_bump) set_prev_bit_in_hdr(nxt, prev_in_use);
 }
 
 static inline size_t get_free_chunk_min_size(void) {
@@ -154,6 +173,7 @@ static void push_front_to_free_list(free_chunk_t *fc) {
     g_free_list = fc;
 }
 
+/*
 static void dump_free_list(void) {
     printf("free list:\n");
     free_chunk_t *p = g_free_list;
@@ -170,6 +190,7 @@ static void dump_free_list(void) {
         i += 1;
     }
 }
+*/
 
 // ===== Core helpers =====
 static void* split_free_chunk(free_chunk_t *fc, size_t need_total) {
@@ -182,13 +203,13 @@ static void* split_free_chunk(free_chunk_t *fc, size_t need_total) {
 
         uint8_t *base = (uint8_t*)fc;
         set_hdr_keep_prev(base, need_total, 0);
-        set_prev_in_next_chunk(base, 1);
+        set_prev_bit_in_next_chunk_hdr(base, 1);
 
         uint8_t *rem = base + need_total;
         size_t rem_sz = csz - need_total;
         
         set_hdr_keep_prev(rem, rem_sz, 1);
-        set_prev(rem, 1);
+        // set_prev_bit_in_hdr(rem, 1);
         set_ftr(rem, rem_sz);
         
         ((free_chunk_t*)rem)->links.fd = ((free_chunk_t*)rem)->links.bk = NULL;
@@ -226,7 +247,7 @@ static void* carve_from_top(size_t need_total) {
     if ((size_t)(g_end - hdr) < need_total) return NULL;
 
     set_hdr_keep_prev(hdr, need_total, 0);
-    set_prev(hdr, 1);
+    set_prev_bit_in_hdr(hdr, 1);
 
     g_bump = hdr + need_total;
 
@@ -237,7 +258,7 @@ static void* coalesce(void *hdr) {
     size_t csz = get_chunk_size(hdr);
 
     // merge RIGHT if free
-    void *nxt = get_next_chunk(hdr);
+    void *nxt = get_next_chunk_hdr(hdr);
     if ((uint8_t*)nxt <= g_bump && chunk_is_free(nxt)) {
         remove_from_free_list((free_chunk_t*)nxt);
         size_t new_sz = get_chunk_size(hdr) + get_chunk_size(nxt);
@@ -246,8 +267,8 @@ static void* coalesce(void *hdr) {
     }
 
     // merge LEFT if free
-    // But be careful to check that the left chunk is actually free!
-    if ( ((*(size_t*)hdr) & CHUNK_PREV_IN_USE_BIT) == 0 ) {        // prev is FREE
+    // But make sure that the left chunk is actually free!
+    if (prev_chunk_is_free(hdr)) {
         uint8_t *p = (uint8_t*)hdr;
         size_t prev_footer = *(size_t*)(p - sizeof(size_t));
 
@@ -263,7 +284,7 @@ static void* coalesce(void *hdr) {
             csz = total;
         }
     }
-    
+
     return hdr;
 }
 
@@ -325,7 +346,7 @@ void my_free(void *ptr) {
     size_t msz = get_chunk_size(merged);
     uint8_t *merged_end = (uint8_t*)merged + msz;
 
-    set_prev_in_next_chunk(merged, 0);
+    set_prev_bit_in_next_chunk_hdr(merged, 0);
 
     // if the freed chunk touches the top, don't add to free list, shrink the unexplored region
     if (merged_end == g_bump) {
