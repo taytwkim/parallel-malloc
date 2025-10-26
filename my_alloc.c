@@ -6,7 +6,7 @@
 #include <string.h>
 #include <stdio.h>
 
-const int DEBUG = 1;
+const int DEBUG = 0;
 
 #ifndef MYALLOC_REGION_SIZE
 #define MYALLOC_REGION_SIZE (64ULL * 1024ULL * 1024ULL)
@@ -33,8 +33,8 @@ typedef struct free_links {
 } free_links_t;
 
 typedef struct free_chunk {
-    size_t        size_and_flags;   // total size (incl header; footer exists only when free)
-    free_links_t  links;            // valid only when free (lives at start of payload)
+    size_t        size_and_flags;           // total size (incl header; footer exists only when free)
+    free_links_t  links;                    // valid only when free (lives at start of payload)
 } free_chunk_t;
 
 // ===== Global arena & free list =====
@@ -43,15 +43,18 @@ static uint8_t      *g_bump = NULL;         // unexplored region to carve out fr
 static uint8_t      *g_end  = NULL;         // one past end of the mmaped region
 static free_chunk_t *g_free_list = NULL;    // head of doubly-linked free list
 
+#define OFF(P) ((int)((uintptr_t)(P) - (uintptr_t)g_base))    // offset from g_base; for debugging
+
 static void myalloc_init(void) {
     // mmap a memory region to intialize the arena
+    
     if (DEBUG) printf("[alloc_init] entered\n");
 
-    if (g_base) return; // we want to initialize only once
+    if (g_base) return; // initialize only once
 
     size_t req = MYALLOC_REGION_SIZE;
     size_t ps  = pagesize();
-    if (req % ps) req += ps - (req % ps); // round the requested mapping size up to OS page size
+    if (req % ps) req += ps - (req % ps); // round the requested size up to OS page size
 
     void *mem = mmap(NULL, req, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (mem == MAP_FAILED) return;
@@ -59,9 +62,9 @@ static void myalloc_init(void) {
     g_base = (uint8_t*)mem;
     g_bump = g_base;
     g_end  = g_base + req;
-    g_free_list = NULL; // start with empty freelist; carve on demand
+    g_free_list = NULL;   // start with empty freelist; carve on demand
 
-    if (DEBUG) printf("[alloc_init] initialized arena: base=%p, end=%p, bump=%p\n", g_base, g_end, g_bump);
+    if (DEBUG) printf("[alloc_init] initialized arena: base=%d, end=%d, bump=%d\n", OFF(g_base), OFF(g_end), OFF(g_bump));
 }
 
 // ===== Chunk Flags and Masks =====
@@ -70,21 +73,27 @@ static void myalloc_init(void) {
 #define CHUNK_SIZE_MASK (~(size_t)0xFUL)
 
 // CHUNK_FREE_BIT = mask for bit 0 (…0001)
-//   - Set  : header |=  CHUNK_FREE_BIT → mark THIS chunk FREE
-//   - Clear: header &= ~CHUNK_FREE_BIT → mark THIS chunk IN-USE
+//   - Set  : header |=  CHUNK_FREE_BIT → mark chunk FREE
+//   - Clear: header &= ~CHUNK_FREE_BIT → mark chunk IN-USE
 #define CHUNK_FREE_BIT ((size_t)1)
 
-// CHUNK_PREV_IN_USE_BIT = mask for bit 1 (…0010)
-//   - Set  : header |=  CHUNK_PREV_IN_USE_BIT → previous chunk is IN-USE
-//   - Clear: header &= ~CHUNK_PREV_IN_USE_BIT → previous chunk is FREE
+/* CHUNK_PREV_IN_USE_BIT = mask for bit 1 (…0010)
+ *   - Set  : header |=  CHUNK_PREV_IN_USE_BIT → previous chunk is IN-USE
+ *   - Clear: header &= ~CHUNK_PREV_IN_USE_BIT → previous chunk is FREE
+ * 
+ * Why do we need this flag?
+ * We need this flag when merging two chunks. When a chunk is freed, we look at its left neighbor and try to merge.
+ * But we want to first make sure that the left chunk is free. If we read from the left chunk's footer without checking, 
+ * we might be reading from the payload of a chunk that is currently in-use.
+ */
 #define CHUNK_PREV_IN_USE_BIT ((size_t)2)
 
 // ===== Chunk Header & Footer Ops =====
 static inline size_t get_size_from_hdr(size_t hdr) { return hdr & CHUNK_SIZE_MASK; }
 static inline int get_free_bit_from_hdr(size_t hdr) { return (int)(hdr & CHUNK_FREE_BIT); }
-static inline int get_prev_in_use_bit_from_hdr(size_t hdr_word) { return (int)(hdr_word & CHUNK_PREV_IN_USE_BIT); }
+// static inline int get_prev_in_use_bit_from_hdr(size_t hdr_word) { return (int)(hdr_word & CHUNK_PREV_IN_USE_BIT); }
 
-static inline void set_prev_in_use(void *hdr, int on) {
+static inline void set_prev(void *hdr, int on) {
     size_t h = *(size_t*)hdr;
     if (on)  h |=  CHUNK_PREV_IN_USE_BIT;
     else     h &= ~CHUNK_PREV_IN_USE_BIT;
@@ -108,19 +117,19 @@ static inline void set_ftr(void *hdr, size_t size_aligned) {
     *(size_t*)(base + size_aligned - sizeof(size_t)) = build_hdr_with_free_bit(size_aligned, 1);
 }
 
-// ===== Pointer Conversion Btwn Chunk Header and Payload =====
+// ===== Pointer Conversion Btwn Header and Payload =====
 static inline uint8_t* get_payload_from_hdr(void *hdr) { return (uint8_t*)hdr + sizeof(size_t); }
 static inline void* get_hdr_from_payload(void *ptr) { return (uint8_t*)ptr - sizeof(size_t); }
 
 // ===== Chunk Ops =====
 static inline size_t get_chunk_size(void *hdr) { return get_size_from_hdr(*(size_t*)hdr); }
 static inline int chunk_is_free(void *hdr) { return get_free_bit_from_hdr(*(size_t*)hdr); }
-static inline int prev_chunk_is_free(void *hdr) { return !get_prev_in_use_bit_from_hdr(*(size_t*)hdr); }
+// static inline int prev_chunk_is_free(void *hdr) { return !get_prev_in_use_bit_from_hdr(*(size_t*)hdr); }
 static inline void* get_next_chunk(void *hdr) { return (uint8_t*)hdr + get_chunk_size(hdr); }
 
-static inline void set_prev_flag_in_next_chunk(void *hdr, int prev_in_use) {
+static inline void set_prev_in_next_chunk(void *hdr, int prev_in_use) {
     void *nxt = get_next_chunk(hdr);
-    if ((uint8_t*)nxt < g_bump) set_prev_in_use(nxt, prev_in_use);
+    if ((uint8_t*)nxt < g_bump) set_prev(nxt, prev_in_use);
 }
 
 static inline size_t get_free_chunk_min_size(void) {
@@ -145,37 +154,24 @@ static void push_front_to_free_list(free_chunk_t *fc) {
     g_free_list = fc;
 }
 
-// ===== Core helpers =====
-static inline void* get_prev_chunk_if_free(void *hdr, int *prev_is_free) {  
-    /* Given the current chunk header, return prev chunk header only if it is free 
-     * 
-     * if prev chunk is free
-     *    - set prev_is_free = 1 and return pointer to prev chunk's header
-     * 
-     * if prev chunk is in-use
-     *    - set prev_is_free = 0 and return null
-     */
+static void dump_free_list(void) {
+    printf("free list:\n");
+    free_chunk_t *p = g_free_list;
 
-    uint8_t *p = (uint8_t*)hdr;
+    if (!p) { printf("  (empty)\n"); return; }
 
-    if (p == g_base) { 
-        *prev_is_free = 0; 
-        return NULL; 
+    size_t i = 0;
+    while (p) {
+        uint8_t *end = (uint8_t*)p + get_chunk_size(p);
+        printf("  #%zu hdr=%d end=%d\n", i, OFF(p), OFF(end));
+
+        free_chunk_t *next = p->links.fd;
+        p = next;
+        i += 1;
     }
-    
-    size_t prev_footer = *(size_t*)(p - sizeof(size_t));
-    
-    if (!get_free_bit_from_hdr(prev_footer)) { 
-        *prev_is_free = 0; 
-        return NULL; 
-    }
-    
-    size_t prev_sz = get_size_from_hdr(prev_footer);
-    *prev_is_free = 1;
-    
-    return p - prev_sz;
 }
 
+// ===== Core helpers =====
 static void* split_free_chunk(free_chunk_t *fc, size_t need_total) {
     size_t csz = get_chunk_size(fc);
     const size_t MIN_FREE = get_free_chunk_min_size();
@@ -186,13 +182,13 @@ static void* split_free_chunk(free_chunk_t *fc, size_t need_total) {
 
         uint8_t *base = (uint8_t*)fc;
         set_hdr_keep_prev(base, need_total, 0);
-        set_prev_flag_in_next_chunk(base, 1);
+        set_prev_in_next_chunk(base, 1);
 
         uint8_t *rem = base + need_total;
         size_t rem_sz = csz - need_total;
         
         set_hdr_keep_prev(rem, rem_sz, 1);
-        set_prev_in_use(rem, 1);
+        set_prev(rem, 1);
         set_ftr(rem, rem_sz);
         
         ((free_chunk_t*)rem)->links.fd = ((free_chunk_t*)rem)->links.bk = NULL;
@@ -230,6 +226,8 @@ static void* carve_from_top(size_t need_total) {
     if ((size_t)(g_end - hdr) < need_total) return NULL;
 
     set_hdr_keep_prev(hdr, need_total, 0);
+    set_prev(hdr, 1);
+
     g_bump = hdr + need_total;
 
     return hdr;
@@ -240,25 +238,30 @@ static void* coalesce(void *hdr) {
 
     // merge RIGHT if free
     void *nxt = get_next_chunk(hdr);
-    if ((uint8_t*)nxt < g_bump && chunk_is_free(nxt)) {
-        if (DEBUG) printf("[coalesce] right chunk is free, merge with right chunk\n");
+    if ((uint8_t*)nxt <= g_bump && chunk_is_free(nxt)) {
         remove_from_free_list((free_chunk_t*)nxt);
-        csz += get_chunk_size(nxt);
-        set_hdr_keep_prev(hdr, csz, 1);
-        set_ftr(hdr, csz);
+        size_t new_sz = get_chunk_size(hdr) + get_chunk_size(nxt);
+        set_hdr_keep_prev(hdr, new_sz, 1);
+        set_ftr(hdr, new_sz);
     }
 
     // merge LEFT if free
-    int prev_is_free = 0;
-    void *prv = get_prev_chunk_if_free(hdr, &prev_is_free);
-    if (prev_is_free) {
-        if (DEBUG) printf("[coalesce] left chunk is free, merge with left chunk\n");
-        remove_from_free_list((free_chunk_t*)prv);
-        size_t total = get_chunk_size(prv) + csz;
-        set_hdr_keep_prev(prv, total, 1);
-        set_ftr(prv, total);
-        hdr = prv;
-        csz = total;
+    // But be careful to check that the left chunk is actually free!
+    if ( ((*(size_t*)hdr) & CHUNK_PREV_IN_USE_BIT) == 0 ) {        // prev is FREE
+        uint8_t *p = (uint8_t*)hdr;
+        size_t prev_footer = *(size_t*)(p - sizeof(size_t));
+
+        if (get_free_bit_from_hdr(prev_footer)) {                  // sanity check
+            size_t prev_sz = get_size_from_hdr(prev_footer);
+            void *prv = p - prev_sz;
+            if (DEBUG) printf("[coalesce] left chunk is free, merge with left chunk\n");
+            remove_from_free_list((free_chunk_t*)prv);
+            size_t total = prev_sz + csz;
+            set_hdr_keep_prev(prv, total, 1);                      // prev bit of prev stays
+            set_ftr(prv, total);
+            hdr = prv;
+            csz = total;
+        }
     }
     
     return hdr;
@@ -279,63 +282,66 @@ void *my_malloc(size_t size) {
 
     if (DEBUG) printf("[malloc] aligned: payload=%zu (from %zu), needed_size=%zu\n", payload, size, need);
 
-    void *hdr = try_free_list(need);  // Try free list
+    void *hdr = try_free_list(need);
 
     if (!hdr) {
-        if (DEBUG) printf("[malloc] freelist miss; carve from top; bump=%p\n", (void*) g_bump);
+        if (DEBUG) printf("[malloc] freelist miss; carve from top; bump=%d\n", OFF(g_bump));
 
-        // if we weren't able to find a suitable chunk from the free list, carve chunk from top
-        hdr = carve_from_top(need);
+        hdr = carve_from_top(need); // if we weren't able to find a suitable chunk from the free list, carve chunk from top
 
         if (!hdr) return NULL; // out of arena
 
         if (DEBUG) { 
             uint8_t *payload_ptr = get_payload_from_hdr(hdr);
             uint8_t *chunk_end = (uint8_t*)hdr + get_chunk_size(hdr);
-            printf("[malloc] from-top: hdr=%p  payload=%p  end=%p  size=%zu  aligned=%d\n", hdr, payload_ptr, chunk_end, get_chunk_size(hdr), ((uintptr_t)payload_ptr & 15u) == 0);
+            printf("[malloc] from-top: hdr=%d  payload=%d  end=%d  size=%zu  aligned=%d\n", OFF(hdr), OFF(payload_ptr), OFF(chunk_end), get_chunk_size(hdr), ((uintptr_t)payload_ptr & 15u) == 0);
         }
     }
     else {
         if (DEBUG) {
             uint8_t *payload_ptr = get_payload_from_hdr(hdr);
             uint8_t *chunk_end = (uint8_t*)hdr + get_chunk_size(hdr);
-            printf("[malloc] from-free-list: hdr=%p  payload=%p  end=%p  size=%zu  aligned=%d\n", hdr, payload_ptr, chunk_end, get_chunk_size(hdr), ((uintptr_t)payload_ptr & 15u) == 0);
+            printf("[malloc] from-free-list: hdr=%d  payload=%d  end=%d  size=%zu  aligned=%d\n", OFF(hdr), OFF(payload_ptr), OFF(chunk_end), get_chunk_size(hdr), ((uintptr_t)payload_ptr & 15u) == 0);
         }
     }
     
-    set_hdr_keep_prev(hdr, need, 0);
-    set_prev_flag_in_next_chunk(hdr, 1);
-
     return get_payload_from_hdr(hdr);
 }
 
 void my_free(void *ptr) {
-    if (DEBUG) printf("[free] entered: ptr=%p\n", ptr);
+    if (DEBUG) printf("[free] entered: ptr=%d\n", OFF(ptr));
 
     if (!ptr) return;
 
     uint8_t *hdr = (uint8_t*)get_hdr_from_payload(ptr);
     size_t csz = get_chunk_size(hdr);
 
-    if (DEBUG) printf("[free] header=%p, size=%zu\n", hdr, csz);
+    if (DEBUG) printf("[free] header=%d, size=%zu\n", OFF(hdr), csz);
 
     set_hdr_keep_prev(hdr, csz, 1);
     set_ftr(hdr, csz);
 
     void *merged = coalesce(hdr);
-    size_t msz   = get_chunk_size(merged);
+    size_t msz = get_chunk_size(merged);
     uint8_t *merged_end = (uint8_t*)merged + msz;
 
-    set_prev_flag_in_next_chunk(merged, 0);
+    set_prev_in_next_chunk(merged, 0);
 
     // if the freed chunk touches the top, don't add to free list, shrink the unexplored region
     if (merged_end == g_bump) {
         g_bump = (uint8_t*)merged;
-        if (DEBUG) printf("[free] touches top; shrink: new g_bump=%p\n", g_bump);
+        if (DEBUG) {
+            printf("[free] touches top; shrink: new g_bump=%d\n", OFF(g_bump));
+            // dump_free_list();
+        }
         return;
     }
 
     ((free_chunk_t*)merged)->links.fd = ((free_chunk_t*)merged)->links.bk = NULL;
     push_front_to_free_list((free_chunk_t*)merged);
-    if (DEBUG) printf("[free] pushed to freelist: %p size=%zu\n", merged, msz);
+
+    if (DEBUG) {
+        printf("[free] pushed to freelist: %d size=%zu\n", OFF(merged), msz);
+        // dump_free_list();
+    }
 }
