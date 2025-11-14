@@ -1,3 +1,3 @@
-# Simple Malloc
+# Parallel Malloc
 
-Implement a simple memory allocator.
+Implement a memory allocator for multi-threaded programs.
