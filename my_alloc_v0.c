@@ -15,9 +15,9 @@
 const int DEBUG = 0;
 const int VERBOSE = 0;
 
-// 67,108,864 bytes (64 MiB)
+// MMAP 1 GiB
 #ifndef MYALLOC_REGION_SIZE
-#define MYALLOC_REGION_SIZE (64ULL * 1024ULL * 1024ULL)
+#define MYALLOC_REGION_SIZE (1ULL * 1024 * 1024 * 1024)
 #endif
 
 // ===== Helpers =====

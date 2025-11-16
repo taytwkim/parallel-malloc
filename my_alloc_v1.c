@@ -97,7 +97,7 @@ static void arena_init(arena_t *a) {
 
     a->base = (uint8_t*)mem;
     a->bump = a->base;
-    a->end  = a->base + req;
+    a->end = a->base + req;
     a->free_list = NULL;
 
     pthread_mutex_init(&a->lock, NULL);
@@ -368,8 +368,6 @@ void *my_malloc(size_t size) {
     arena_t *a = get_my_arena();
     if (!a || !a->base) return NULL;
 
-    pthread_mutex_lock(&a->lock);
-
     if (DEBUG) printf("[malloc] entered: req=%zu [tid=%d]\n", size, omp_get_thread_num());
 
     size_t payload = align16(size);
@@ -402,6 +400,7 @@ void *my_malloc(size_t size) {
 
     // 2) If tcache miss, fall back to arena freelist / bump
     if (!hdr) {
+        pthread_mutex_lock(&a->lock);
         hdr = try_free_list(a, need);
 
         if (!hdr) {
@@ -427,13 +426,13 @@ void *my_malloc(size_t size) {
                 printf("[malloc] from-free-list: hdr=%d  payload=%d  end=%d  size=%zu  aligned=%d\n", OFF(a, hdr), OFF(a, payload_ptr), OFF(a, chunk_end), get_chunk_size(hdr), ((uintptr_t)payload_ptr & 15u) == 0);
             }
         }
+        pthread_mutex_unlock(&a->lock);
     }
 
     void *ret = get_payload_from_hdr(hdr);
 
     if (DEBUG) printf("[malloc] exit: [tid=%d]\n", omp_get_thread_num());
     
-    pthread_mutex_unlock(&a->lock);
     return ret;
 }
 
@@ -442,8 +441,6 @@ void my_free(void *ptr) {
 
     arena_t *a = get_my_arena();
     if (!a || !a->base) return;
-
-    pthread_mutex_lock(&a->lock);
 
     if (DEBUG) printf("[free] entered: ptr=%d [tid=%d]\n", OFF(a, ptr), omp_get_thread_num());
 
@@ -470,12 +467,12 @@ void my_free(void *ptr) {
             if (DEBUG && VERBOSE) printf("[free] put into tcache bin=%d (count=%d)\n", bin, b->count);
             if (DEBUG) printf("[free] exit (tcache): [tid=%d]\n", omp_get_thread_num());
             
-            pthread_mutex_unlock(&a->lock);
             return;
         }
     }
 
     // 2) Otherwise fall back to the old free path: mark free, coalesce, push into arena freelist.
+    pthread_mutex_lock(&a->lock);
 
     set_hdr_keep_prev(hdr, csz, 1);  // mark free (sets FREE bit, keeps prev bit)
     set_ftr(hdr, csz);
