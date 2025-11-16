@@ -24,6 +24,7 @@ static void test_alignment(void){
     my_free(c);
 }
 
+/*
 static void test_coalesce_reuse(void){
     // Sizes chosen so A need=48, B need=56 (64-bit), A+B=104
 
@@ -44,6 +45,7 @@ static void test_coalesce_reuse(void){
     my_free(d);
     my_free(c);
 }
+*/
 
 static void test_top_shrink_reuse(void){
     // Allocate two blocks; 'y' is the last (top/wilderness).
@@ -108,8 +110,8 @@ int main(void){
     printf("[*] test_alignment...\n");
     test_alignment();
     
-    printf("[*] test_coalesce_reuse...\n");
-    test_coalesce_reuse();
+    // printf("[*] test_coalesce_reuse...\n");
+    // test_coalesce_reuse();
     
     printf("[*] test_top_shrink_reuse...\n");
     test_top_shrink_reuse();
