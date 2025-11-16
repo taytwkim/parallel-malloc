@@ -8,6 +8,10 @@
 #include <pthread.h>
 #include <omp.h>
 
+/* My Alloc V0
+ * Minimal memory allocator with one global arena and a free list
+ */
+
 const int DEBUG = 0;
 const int VERBOSE = 0;
 

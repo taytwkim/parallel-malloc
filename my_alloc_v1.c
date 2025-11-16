@@ -8,6 +8,10 @@
 #include <pthread.h>
 #include <omp.h>
 
+/* My Alloc V1
+ * Update from V0: Added multiple arenas and tcaches 
+ */
+
 const int DEBUG = 0;
 const int VERBOSE = 0;
 
@@ -59,11 +63,11 @@ typedef struct free_chunk {
 } free_chunk_t;
 
 typedef struct arena {
-    uint8_t      *base;       // start of mmapped region
-    uint8_t      *bump;       // unexplored region
-    uint8_t      *end;        // one past end
-    free_chunk_t *free_list;  // head of free list
-    pthread_mutex_t lock;     // lock protecting this arena
+    uint8_t      *base;           // start of mmapped region
+    uint8_t      *bump;           // unexplored region
+    uint8_t      *end;            // one past end
+    free_chunk_t *free_list;      // head of free list
+    pthread_mutex_t lock;         // lock protecting this arena
 } arena_t;
 
 #define MAX_ARENAS 64
@@ -71,7 +75,7 @@ typedef struct arena {
 static arena_t g_arenas[MAX_ARENAS];
 static int g_narenas = 0;
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
-static _Thread_local arena_t *t_arena = NULL;
+static _Thread_local arena_t *t_arena = NULL;       // per-thread pointer to its assgined arena
 
 static inline int OFF(arena_t *a, void *p) {
     return (int)((uintptr_t)p - (uintptr_t)a->base);
@@ -103,9 +107,11 @@ static void arena_init(arena_t *a) {
 
 static void global_init(void) {
     int ncores = omp_get_max_threads();
+
     if (ncores < 1) ncores = 1;
 
     g_narenas = ncores;
+
     if (g_narenas > MAX_ARENAS) g_narenas = MAX_ARENAS;
 
     for (int i = 0; i < g_narenas; ++i) {
@@ -115,40 +121,44 @@ static void global_init(void) {
 }
 
 static arena_t *get_my_arena(void) {
-    pthread_once(&g_once, global_init);
+    pthread_once(&g_once, global_init); // check that global init has run
 
     if (t_arena) return t_arena;
 
     int tid = omp_get_thread_num();   // outside parallel region this is 0
+    
     if (tid < 0) tid = 0;
 
     int idx = tid % g_narenas;
     t_arena = &g_arenas[idx];
+    
     return t_arena;
 }
 
 // ===== Tcache =====
 
-// We will bucket by "usable size" = chunk_size - sizeof(size_t).
-// Each bin roughly corresponds to a 16-byte step of usable size.
-#define TCACHE_MAX_BINS   64          // up to ~1KB usable (roughly)
-#define TCACHE_MAX_COUNT  32          // max entries per bin per thread
+#define TCACHE_MAX_BINS   64
+#define TCACHE_MAX_COUNT  32
 
 typedef struct tcache_bin {
-    free_chunk_t *head;   // singly-linked stack via links.fd
-    int           count;
+    free_chunk_t *head;   // head of the linked list
+    int count;
 } tcache_bin_t;
 
-// Per-thread tcache
-static _Thread_local tcache_bin_t g_tcache[TCACHE_MAX_BINS];
+static _Thread_local tcache_bin_t g_tcache[TCACHE_MAX_BINS];  // per-thread tcache
 
-// Map usable size (bytes) -> tcache bin index or -1 if not cached.
 static inline int size_to_tcache_bin(size_t usable) {
-    // bucket in units of 16 bytes:  (16,32,48,...) etc.
+    /* Size classes are 16, 32, ...
+     * 
+     * Bin 0: usable in [16 .. 31]
+     * Bin 1: usable in [32 .. 47]
+     * ...
+     */
+
     size_t idx = usable / 16;
-    if (idx == 0) return -1;               // too small / weird
-    if (idx > TCACHE_MAX_BINS) return -1;  // too big for tcache
-    return (int)(idx - 1);                 // 0-based
+    if (idx == 0) return -1;               // too small
+    if (idx > TCACHE_MAX_BINS) return -1;  // too big for tcache, try free list
+    return (int)(idx - 1);                 // index is 0-based
 }
 
 // ===== Chunk Flags and Masks =====
@@ -364,17 +374,15 @@ void *my_malloc(size_t size) {
 
     size_t payload = align16(size);
     size_t need = align16(sizeof(size_t) + payload);  // header + payload
-    size_t usable = need - sizeof(size_t);            // "usable size" inside chunk
+    size_t usable = need - sizeof(size_t);            // payload + padding for alignment
 
     int bin = size_to_tcache_bin(usable);
 
-    if (DEBUG && VERBOSE) {
-        printf("[malloc] aligned: payload=%zu (from %zu), need=%zu usable=%zu bin=%d\n",
-              payload, size, need, usable, bin);
-    }
+    if (DEBUG && VERBOSE) printf("[malloc] aligned: payload=%zu (from %zu), need=%zu usable=%zu bin=%d\n", payload, size, need, usable, bin);
 
     // 1) Try per-thread tcache first
     void *hdr = NULL;
+
     if (bin >= 0) {
         tcache_bin_t *b = &g_tcache[bin];
         if (b->head != NULL) {
@@ -386,10 +394,8 @@ void *my_malloc(size_t size) {
 
             if (DEBUG && VERBOSE) {
                 uint8_t *payload_ptr = get_payload_from_hdr(hdr);
-                uint8_t *chunk_end   = (uint8_t*)hdr + get_chunk_size(hdr);
-                printf("[malloc] from-tcache: hdr=%d payload=%d end=%d size=%zu\n",
-                      OFF(a, hdr), OFF(a, payload_ptr), OFF(a, chunk_end),
-                      get_chunk_size(hdr));
+                uint8_t *chunk_end   = (uint8_t*)hdr + get_chunk_size(hdr);           
+                printf("[malloc] from-tcache: hdr=%d payload=%d end=%d size=%zu\n", OFF(a, hdr), OFF(a, payload_ptr), OFF(a, chunk_end), get_chunk_size(hdr));
             }
         }
     }
@@ -399,9 +405,7 @@ void *my_malloc(size_t size) {
         hdr = try_free_list(a, need);
 
         if (!hdr) {
-            if (DEBUG && VERBOSE) {
-                printf("[malloc] freelist miss; carve from top; bump=%d\n", OFF(a, a->bump));
-            }
+            if (DEBUG && VERBOSE) printf("[malloc] freelist miss; carve from top; bump=%d\n", OFF(a, a->bump));
 
             hdr = carve_from_top(a, need); // carve from top
 
@@ -413,19 +417,14 @@ void *my_malloc(size_t size) {
             if (DEBUG && VERBOSE) { 
                 uint8_t *payload_ptr = get_payload_from_hdr(hdr);
                 uint8_t *chunk_end   = (uint8_t*)hdr + get_chunk_size(hdr);
-                printf("[malloc] from-top: hdr=%d  payload=%d  end=%d  size=%zu  aligned=%d\n",
-                      OFF(a, hdr), OFF(a, payload_ptr), OFF(a, chunk_end),
-                      get_chunk_size(hdr),
-                      ((uintptr_t)payload_ptr & 15u) == 0);
+                printf("[malloc] from-top: hdr=%d  payload=%d  end=%d  size=%zu  aligned=%d\n", OFF(a, hdr), OFF(a, payload_ptr), OFF(a, chunk_end), get_chunk_size(hdr), ((uintptr_t)payload_ptr & 15u) == 0);
             }
-        } else {
+        } 
+        else {
             if (DEBUG && VERBOSE) {
                 uint8_t *payload_ptr = get_payload_from_hdr(hdr);
                 uint8_t *chunk_end   = (uint8_t*)hdr + get_chunk_size(hdr);
-                printf("[malloc] from-free-list: hdr=%d  payload=%d  end=%d  size=%zu  aligned=%d\n",
-                      OFF(a, hdr), OFF(a, payload_ptr), OFF(a, chunk_end),
-                      get_chunk_size(hdr),
-                      ((uintptr_t)payload_ptr & 15u) == 0);
+                printf("[malloc] from-free-list: hdr=%d  payload=%d  end=%d  size=%zu  aligned=%d\n", OFF(a, hdr), OFF(a, payload_ptr), OFF(a, chunk_end), get_chunk_size(hdr), ((uintptr_t)payload_ptr & 15u) == 0);
             }
         }
     }
@@ -433,6 +432,7 @@ void *my_malloc(size_t size) {
     void *ret = get_payload_from_hdr(hdr);
 
     if (DEBUG) printf("[malloc] exit: [tid=%d]\n", omp_get_thread_num());
+    
     pthread_mutex_unlock(&a->lock);
     return ret;
 }
@@ -445,20 +445,14 @@ void my_free(void *ptr) {
 
     pthread_mutex_lock(&a->lock);
 
-    if (DEBUG) {
-        printf("[free] entered: ptr=%d [tid=%d]\n",
-               OFF(a, ptr), omp_get_thread_num());
-    }
+    if (DEBUG) printf("[free] entered: ptr=%d [tid=%d]\n", OFF(a, ptr), omp_get_thread_num());
 
     uint8_t *hdr = (uint8_t*)get_hdr_from_payload(ptr);
-    size_t   csz = get_chunk_size(hdr);
-    size_t   usable = csz - sizeof(size_t);
-    int      bin = size_to_tcache_bin(usable);
+    size_t csz = get_chunk_size(hdr);
+    size_t usable = csz - sizeof(size_t);
+    int bin = size_to_tcache_bin(usable);
 
-    if (DEBUG && VERBOSE) {
-        printf("[free] header=%d, size=%zu usable=%zu bin=%d\n",
-               OFF(a, hdr), csz, usable, bin);
-    }
+    if (DEBUG && VERBOSE) printf("[free] header=%d, size=%zu usable=%zu bin=%d\n", OFF(a, hdr), csz, usable, bin);
 
     // 1) Try to put small chunks into per-thread tcache
     if (bin >= 0) {
@@ -468,18 +462,14 @@ void my_free(void *ptr) {
 
             // IMPORTANT: do NOT mark as free, do NOT set footer, do NOT coalesce.
             // Chunk stays "in-use" from the global allocator's point of view.
-
+            
             fc->links.fd = b->head;
-            // bk is unused; optionally zero it: fc->links.bk = NULL;
             b->head = fc;
             b->count++;
 
-            if (DEBUG && VERBOSE) {
-                printf("[free] put into tcache bin=%d (count=%d)\n",
-                       bin, b->count);
-            }
-
+            if (DEBUG && VERBOSE) printf("[free] put into tcache bin=%d (count=%d)\n", bin, b->count);
             if (DEBUG) printf("[free] exit (tcache): [tid=%d]\n", omp_get_thread_num());
+            
             pthread_mutex_unlock(&a->lock);
             return;
         }
@@ -492,7 +482,7 @@ void my_free(void *ptr) {
 
     void *merged = coalesce(a, hdr);
 
-    size_t   msz        = get_chunk_size(merged);
+    size_t msz = get_chunk_size(merged);
     uint8_t *merged_end = (uint8_t*)merged + msz;
 
     set_next_chunk_hdr_prev(a, merged, 0);
@@ -500,11 +490,10 @@ void my_free(void *ptr) {
     // if the freed chunk touches the top, don't add to free list, shrink the unexplored region
     if (merged_end == a->bump) {
         a->bump = (uint8_t*)merged;
-        if (DEBUG && VERBOSE) {
-            printf("[free] touches top; shrink: new bump=%d\n", OFF(a, a->bump));
-        }
 
+        if (DEBUG && VERBOSE) printf("[free] touches top; shrink: new bump=%d\n", OFF(a, a->bump));
         if (DEBUG) printf("[free] exit (shrink): [tid=%d]\n", omp_get_thread_num());
+
         pthread_mutex_unlock(&a->lock);
         return;
     }
@@ -512,12 +501,8 @@ void my_free(void *ptr) {
     ((free_chunk_t*)merged)->links.fd = ((free_chunk_t*)merged)->links.bk = NULL;
     push_front_to_free_list(a, (free_chunk_t*)merged);
 
-    if (DEBUG && VERBOSE) {
-        printf("[free] pushed to freelist: %d size=%zu\n",
-               OFF(a, merged), msz);
-    }
-
+    if (DEBUG && VERBOSE) printf("[free] pushed to freelist: %d size=%zu\n", OFF(a, merged), msz);
     if (DEBUG) printf("[free] exit: [tid=%d]\n", omp_get_thread_num());
+
     pthread_mutex_unlock(&a->lock);
 }
-
