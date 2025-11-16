@@ -206,7 +206,7 @@ static void* split_free_chunk(free_chunk_t *fc, size_t need_total) {
     size_t csz = get_chunk_size(fc);
     const size_t MIN_FREE = get_free_chunk_min_size();
 
-    // Split if the leftover chunk is big enough to be a valid free chunk
+    // Split only if the leftover chunk is big enough to be a valid free chunk
     if (csz >= need_total + MIN_FREE) {
         remove_from_free_list(fc);
 
@@ -226,7 +226,7 @@ static void* split_free_chunk(free_chunk_t *fc, size_t need_total) {
         return base;
     }
     else {
-        // return the whole chunk
+        // Return the whole chunk
         remove_from_free_list(fc);
         set_hdr_keep_prev(fc, csz, 0);
         set_next_chunk_hdr_prev(fc, 1);
@@ -239,6 +239,7 @@ static void* try_free_list(size_t need_total) {
     for (free_chunk_t *p = g_free_list; p; p = p->links.fd) {
         if (!chunk_is_free(p)) continue;
         
+        // need_total is header + payload
         if (get_chunk_size(p) >= need_total) {
             return split_free_chunk(p, need_total);
         }
@@ -256,6 +257,13 @@ static void* carve_from_top(size_t need_total) {
     if ((size_t)(g_end - hdr) < need_total) return NULL;
 
     set_hdr_keep_prev(hdr, need_total, 0);
+
+    /* This looks suspicious but is actually correct.
+     * Note that when we carve, the prev chunk will always be in-use. 
+     * Because we always merge after free list, no chunk in the free list can be adjacent to the unexplored region
+     * 
+     * Also, when we carve at base==bump, we do want to set prev_bit as 1, in order to prevent left merge later
+     */
     set_prev_bit_in_hdr(hdr, 1);
 
     g_bump = hdr + need_total;
@@ -274,7 +282,7 @@ static void* coalesce(void *hdr) {
 
         size_t nxt_sz = get_chunk_size(nxt);
         remove_from_free_list((free_chunk_t*)nxt);
-        csz += nxt_sz;                          // keep size in sync
+        csz += nxt_sz;
         set_hdr_keep_prev(hdr, csz, 1);
         set_ftr(hdr, csz);
     }
@@ -286,7 +294,7 @@ static void* coalesce(void *hdr) {
         uint8_t *p = (uint8_t*)hdr;
         size_t prev_footer = *(size_t*)(p - sizeof(size_t));
 
-        if (get_free_bit_from_hdr(prev_footer)) {    // sanity check
+        if (get_free_bit_from_hdr(prev_footer)) {    // double check
             size_t prev_sz = get_size_from_hdr(prev_footer);
             void *prv = p - prev_sz;
             remove_from_free_list((free_chunk_t*)prv);

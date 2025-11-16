@@ -1,3 +1,3 @@
-# Parallel Malloc
+# Multi-threaded Malloc
 
-Implement a memory allocator for multi-threaded programs.
+Memory allocator for multi-threaded programs.
