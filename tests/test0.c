@@ -1,10 +1,9 @@
-// test_my_alloc.c
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
-#include "my_alloc.h"
+#include "../my_alloc.h"
 
 static int aligned16(void *p){ 
     return ((uintptr_t)p & 15u) == 0; 
