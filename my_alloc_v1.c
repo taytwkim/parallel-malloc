@@ -13,9 +13,8 @@
 const int DEBUG = 0;
 const int VERBOSE = 0;
 
-// 64 MiB, each arena gets this much memory
-#ifndef MYALLOC_REGION_SIZE
-#define MYALLOC_REGION_SIZE (64ULL * 1024ULL * 1024ULL)
+#ifndef MYALLOC_TOTAL_REGION_SIZE
+#define MYALLOC_TOTAL_REGION_SIZE (1ULL * 1024ULL * 1024ULL * 1024ULL)
 #endif
 
 // ===== Helpers =====
@@ -74,15 +73,15 @@ static arena_t g_arenas[MAX_ARENAS];
 static int g_narenas = 0;
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
 static _Thread_local arena_t *t_arena = NULL;       // per-thread pointer to its assgined arena
+static size_t g_arena_bytes = 0;    // per-arena size 
+
 
 static inline int OFF(arena_t *a, void *p) {
     return (int)((uintptr_t)p - (uintptr_t)a->base);
 }
 
 static void arena_init(arena_t *a) {
-    // initialize per-thread arena
-
-    size_t req = MYALLOC_REGION_SIZE;
+    size_t req = g_arena_bytes;
     size_t ps = pagesize();
 
     if (req % ps) req += ps - (req % ps);
@@ -97,7 +96,7 @@ static void arena_init(arena_t *a) {
 
     a->base = (uint8_t*)mem;
     a->bump = a->base;
-    a->end = a->base + req;
+    a->end  = a->base + req;
     a->free_list = NULL;
 
     pthread_mutex_init(&a->lock, NULL);
@@ -105,22 +104,34 @@ static void arena_init(arena_t *a) {
     if (DEBUG) printf("[arena_init] base=%d end=%d bump=%d\n", OFF(a, a->base), OFF(a, a->end), OFF(a, a->bump));
 }
 
+
 static void global_init(void) {
-    // initialize all arenas
-
     int ncores = omp_get_max_threads();
-
     if (ncores < 1) ncores = 1;
 
     g_narenas = ncores;
-
+    
     if (g_narenas > MAX_ARENAS) g_narenas = MAX_ARENAS;
+
+    size_t total = MYALLOC_TOTAL_REGION_SIZE;
+    size_t per   = total / (size_t)g_narenas;
+
+    size_t ps = pagesize();
+    if (per < ps) per = ps;
+    if (per % ps) per += ps - (per % ps);
+
+    g_arena_bytes = per;
+
+    if (DEBUG) {
+        printf("[global_init] ncores=%d g_narenas=%d total=%zu per_arena=%zu\n", ncores, g_narenas, total, g_arena_bytes);
+    }
 
     for (int i = 0; i < g_narenas; ++i) {
         memset(&g_arenas[i], 0, sizeof(arena_t));
         arena_init(&g_arenas[i]);
     }
 }
+
 
 static arena_t *get_my_arena(void) {
     pthread_once(&g_once, global_init);   // check that global init has run
