@@ -22,12 +22,12 @@ static const size_t size_classes[] = {16, 32, 64, 128, 256, 512, 1024};
 
 int main(int argc, char **argv) {
     size_t num_allocs = 100000;  // per iteration
-    size_t num_iters  = 10;      // rounds
+    size_t num_iters = 10;       // rounds
 
     if (argc >= 2) num_allocs = strtoull(argv[1], NULL, 10);
     if (argc >= 3) num_iters  = strtoull(argv[2], NULL, 10);
 
-    omp_set_num_threads(2);   // 2 threads: producer + consumer
+    omp_set_num_threads(2);      // 2 threads: producer + consumer
 
     printf("# Benchmark C: 2-thread producer/consumer with remote frees (mixed sizes)\n");
     printf("# num_threads_fixed=2\n");
@@ -37,6 +37,7 @@ int main(int argc, char **argv) {
 
     // One shared array of pointers for this iteration
     void **ptrs = malloc(num_allocs * sizeof(void*));
+    
     if (!ptrs) {
         fprintf(stderr, "failed to malloc ptrs array (num_allocs=%zu)\n", num_allocs);
         return 1;
@@ -53,6 +54,7 @@ int main(int argc, char **argv) {
                     size_t sz = size_classes[i % NUM_CLASSES];
 
                     void *p = BENCH_ALLOC(sz);
+                    
                     if (!p) {
                         fprintf(stderr, "producer: BENCH_ALLOC failed at iter=%zu i=%zu (size=%zu)\n", it, i, sz);
                         abort();
@@ -62,7 +64,6 @@ int main(int argc, char **argv) {
                     memset(p, 0, sz); // touch memory
                 }
             }
-
             // Wait until producer has filled ptrs[]
             #pragma omp barrier
 
@@ -72,12 +73,10 @@ int main(int argc, char **argv) {
                     BENCH_FREE(ptrs[i]);
                 }
             }
-
             // Wait until consumer has freed before next iteration
             #pragma omp barrier
         }
     }
-
     free(ptrs);
     return 0;
 }
