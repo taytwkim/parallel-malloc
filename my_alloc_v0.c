@@ -1,4 +1,3 @@
-// #define _DARWIN_C_SOURCE
 #include <sys/mman.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -8,21 +7,20 @@
 #include <pthread.h>
 #include <omp.h>
 
-/* My Alloc V0
- * Minimal memory allocator with one global arena and a free list
- */
+// My Alloc V0
+// Minimal memory allocator with one global arena and a free list
 
 const int DEBUG = 0;
 const int VERBOSE = 0;
 
-// MMAP 1 GiB
+// MMAP 1 GiB - we only mmap once at init, so make sure the test cases don't run out of memory
 #ifndef MYALLOC_REGION_SIZE
 #define MYALLOC_REGION_SIZE (1ULL * 1024 * 1024 * 1024)
 #endif
 
 // ===== Helpers =====
 
-/* Round up n to the next multiple of 16 (bytes)
+/* align16 - round up n to the next multiple of 16 (bytes)
  *
  * Why do we align to 16 bytes?
  * 
@@ -35,12 +33,12 @@ const int VERBOSE = 0;
  */
 static inline size_t align16(size_t n) { return (n + 15u) & ~((size_t)15u); } 
 
-static inline size_t pagesize(void) { return (size_t)getpagesize(); }           // return the OS page size
+static inline size_t pagesize(void) { return (size_t)getpagesize(); }   // return the OS page size
 
 // ===== Chunk =====
 
 /* In-use:    [ header (size | flags) ]       8 bytes (in a 64 bit machine), the last four bits are flags
- *            [ payload ... ]
+ *            [ payload ...           ]
  * 
  * Free:      [ header (size | flags) ]       8 bytes
  *            [ fd ]                          8 bytes, forward pointer to the next free chunk
@@ -58,18 +56,18 @@ typedef struct free_links {
 } free_links_t;
 
 typedef struct free_chunk {
-    size_t        size_and_flags;           // total size (incl header; footer exists only when free)
-    free_links_t  links;                    // valid only when free (lives at start of payload)
+    size_t size_and_flags;           // total size (incl header; footer exists only when free)
+    free_links_t links;                    // valid only when free (lives at start of payload)
 } free_chunk_t;
 
 // ===== Global arena & free list =====
-static uint8_t      *g_base = NULL;         // start of mmapped region
-static uint8_t      *g_bump = NULL;         // unexplored region to carve out from
-static uint8_t      *g_end  = NULL;         // one past end of the mmaped region
+static uint8_t *g_base = NULL;              // start of mmapped region
+static uint8_t *g_bump = NULL;              // unexplored region to carve out from
+static uint8_t *g_end  = NULL;              // one past end of the mmaped region
 static free_chunk_t *g_free_list = NULL;    // head of doubly-linked free list
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 
-#define OFF(P) ((int)((uintptr_t)(P) - (uintptr_t)g_base))    // offset from g_base - for debugging
+#define OFF(P) ((int)((uintptr_t)(P) - (uintptr_t)g_base))  // offset from g_base - for debugging
 
 static void myalloc_init(void) {
     // mmap a large memory region and initialize the arena, called only once at the beginning
@@ -79,9 +77,9 @@ static void myalloc_init(void) {
     if (g_base) return; // initialize only once
 
     size_t req = MYALLOC_REGION_SIZE;
-    size_t ps  = pagesize();
+    size_t ps = pagesize();
 
-    if (req % ps) req += ps - (req % ps); // round the requested size up to OS page size (mmap maps whole pages)
+    if (req % ps) req += ps - (req % ps); // round the requested size up to OS page size (maps whole pages)
 
     void *mem = mmap(NULL, req, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     
@@ -89,7 +87,7 @@ static void myalloc_init(void) {
 
     g_base = (uint8_t*)mem;
     g_bump = g_base;
-    g_end  = g_base + req;
+    g_end = g_base + req;
     g_free_list = NULL;   // start with empty freelist; start carving on demand
 
     if (DEBUG) printf("[alloc_init] initialized arena: base=%d, end=%d, bump=%d\n", OFF(g_base), OFF(g_end), OFF(g_bump));
@@ -210,7 +208,7 @@ static void* split_free_chunk(free_chunk_t *fc, size_t need_total) {
     size_t csz = get_chunk_size(fc);
     const size_t MIN_FREE = get_free_chunk_min_size();
 
-    // Split only if the leftover chunk is big enough to be a valid free chunk
+    // Split ONLY if the leftover chunk is big enough to be a valid free chunk
     if (csz >= need_total + MIN_FREE) {
         remove_from_free_list(fc);
 
@@ -243,10 +241,7 @@ static void* try_free_list(size_t need_total) {
     for (free_chunk_t *p = g_free_list; p; p = p->links.fd) {
         if (!chunk_is_free(p)) continue;
         
-        // need_total is header + payload
-        if (get_chunk_size(p) >= need_total) {
-            return split_free_chunk(p, need_total);
-        }
+        if (get_chunk_size(p) >= need_total) return split_free_chunk(p, need_total);    // need_total is header + payload
     }
     return NULL;
 }
@@ -263,6 +258,7 @@ static void* carve_from_top(size_t need_total) {
     set_hdr_keep_prev(hdr, need_total, 0);
 
     /* This looks suspicious but is actually correct.
+     *
      * Note that when we carve, the prev chunk will always be in-use. 
      * Because we always merge after free list, no chunk in the free list can be adjacent to the unexplored region
      * 

@@ -1,4 +1,3 @@
-// #define _DARWIN_C_SOURCE
 #include <sys/mman.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -8,21 +7,20 @@
 #include <pthread.h>
 #include <omp.h>
 
-/* My Alloc V1
- * Update from V0: Added multiple arenas and tcaches 
- */
+// My Alloc V1
+// Upgraded from V0: Add multiple arenas and tcaches
 
 const int DEBUG = 0;
 const int VERBOSE = 0;
 
-// 67,108,864 bytes (64 MiB)
+// 64 MiB, each arena gets this much memory
 #ifndef MYALLOC_REGION_SIZE
 #define MYALLOC_REGION_SIZE (64ULL * 1024ULL * 1024ULL)
 #endif
 
 // ===== Helpers =====
 
-/* Round up n to the next multiple of 16 (bytes)
+/* align16 - round up n to the next multiple of 16 (bytes)
  *
  * Why do we align to 16 bytes?
  * 
@@ -35,12 +33,12 @@ const int VERBOSE = 0;
  */
 static inline size_t align16(size_t n) { return (n + 15u) & ~((size_t)15u); } 
 
-static inline size_t pagesize(void) { return (size_t)getpagesize(); }           // return the OS page size
+static inline size_t pagesize(void) { return (size_t)getpagesize(); }   // return the OS page size
 
 // ===== Chunk =====
 
 /* In-use:    [ header (size | flags) ]       8 bytes (in a 64 bit machine), the last four bits are flags
- *            [ payload ... ]
+ *            [ payload ...           ]
  * 
  * Free:      [ header (size | flags) ]       8 bytes
  *            [ fd ]                          8 bytes, forward pointer to the next free chunk
@@ -58,14 +56,14 @@ typedef struct free_links {
 } free_links_t;
 
 typedef struct free_chunk {
-    size_t        size_and_flags;           // total size (incl header; footer exists only when free)
-    free_links_t  links;                    // valid only when free (lives at start of payload)
+    size_t size_and_flags;        // total size (incl header; footer exists only when free)
+    free_links_t links;           // valid only when free (lives at start of payload)
 } free_chunk_t;
 
 typedef struct arena {
-    uint8_t      *base;           // start of mmapped region
-    uint8_t      *bump;           // unexplored region
-    uint8_t      *end;            // one past end
+    uint8_t *base;                // start of mmapped region
+    uint8_t *bump;                // unexplored region
+    uint8_t *end;                 // one past end
     free_chunk_t *free_list;      // head of free list
     pthread_mutex_t lock;         // lock protecting this arena
 } arena_t;
@@ -82,8 +80,10 @@ static inline int OFF(arena_t *a, void *p) {
 }
 
 static void arena_init(arena_t *a) {
+    // initialize per-thread arena
+
     size_t req = MYALLOC_REGION_SIZE;
-    size_t ps  = pagesize();
+    size_t ps = pagesize();
 
     if (req % ps) req += ps - (req % ps);
 
@@ -106,6 +106,8 @@ static void arena_init(arena_t *a) {
 }
 
 static void global_init(void) {
+    // initialize all arenas
+
     int ncores = omp_get_max_threads();
 
     if (ncores < 1) ncores = 1;
@@ -121,11 +123,11 @@ static void global_init(void) {
 }
 
 static arena_t *get_my_arena(void) {
-    pthread_once(&g_once, global_init); // check that global init has run
+    pthread_once(&g_once, global_init);   // check that global init has run
 
     if (t_arena) return t_arena;
 
-    int tid = omp_get_thread_num();   // outside parallel region this is 0
+    int tid = omp_get_thread_num();       // outside parallel region this is 0
     
     if (tid < 0) tid = 0;
 
@@ -135,10 +137,9 @@ static arena_t *get_my_arena(void) {
     return t_arena;
 }
 
-// ===== Tcache =====
-
-#define TCACHE_MAX_BINS   64
-#define TCACHE_MAX_COUNT  32
+// ===== tcache =====
+#define TCACHE_MAX_BINS 64
+#define TCACHE_MAX_COUNT 32
 
 typedef struct tcache_bin {
     free_chunk_t *head;   // head of the linked list
@@ -293,7 +294,8 @@ static void* split_free_chunk(arena_t *a, free_chunk_t *fc, size_t need_total) {
         push_front_to_free_list(a, (free_chunk_t*)rem);
 
         return base;
-    } else {
+    } 
+    else {
         remove_from_free_list(a, fc);
         set_hdr_keep_prev(fc, csz, 0);
         set_next_chunk_hdr_prev(a, fc, 1);
@@ -305,9 +307,7 @@ static void* try_free_list(arena_t *a, size_t need_total) {
     for (free_chunk_t *p = a->free_list; p; p = p->links.fd) {
         if (!chunk_is_free(p)) continue;
 
-        if (get_chunk_size(p) >= need_total) {
-            return split_free_chunk(a, p, need_total);
-        }
+        if (get_chunk_size(p) >= need_total) return split_free_chunk(a, p, need_total);
     }
     return NULL;
 }
@@ -330,8 +330,8 @@ static void* carve_from_top(arena_t *a, size_t need_total) {
 
 static void* coalesce(arena_t *a, void *hdr) {
     size_t csz = get_chunk_size(hdr);
-
     void *nxt = get_next_chunk_hdr(hdr);
+
     if ((uint8_t*)nxt < a->bump && chunk_is_free(nxt)) {
         if (DEBUG && VERBOSE) printf("[coalesce] right chunk is free, merge with right chunk\n");
 
@@ -474,7 +474,7 @@ void my_free(void *ptr) {
     // 2) Otherwise fall back to the old free path: mark free, coalesce, push into arena freelist.
     pthread_mutex_lock(&a->lock);
 
-    set_hdr_keep_prev(hdr, csz, 1);  // mark free (sets FREE bit, keeps prev bit)
+    set_hdr_keep_prev(hdr, csz, 1);
     set_ftr(hdr, csz);
 
     void *merged = coalesce(a, hdr);
