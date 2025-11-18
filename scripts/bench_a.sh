@@ -6,10 +6,10 @@ ROOT=".."
 VARIANTS=(libc v0 v1)
 
 # ===== Hoard paths =====
-HOARD_LIB_LINUX="/path/to/libhoard.so"
+# HOARD_LIB_LINUX="/path/to/libhoard.so"
 
 # macOS
-# HOARD_LIB_MAC="/Users/taykim/Desktop/Hoard/build/libhoard.dylib"
+HOARD_LIB_MAC="/Users/taykim/Desktop/Hoard/build/libhoard.dylib"
 
 # Churn parameters
 NUM_ALLOCS=50000           # per iteration
@@ -39,6 +39,7 @@ for variant in "${VARIANTS[@]}"; do
     echo
 done
 
+: '
 # ===== Hoard on Linux =====
 if [[ -f "${HOARD_LIB_LINUX}" ]]; then
     exe="${ROOT}/bench_a_libc"
@@ -58,24 +59,25 @@ if [[ -f "${HOARD_LIB_LINUX}" ]]; then
 else
     echo "WARNING HOARD_LIB_LINUX=${HOARD_LIB_LINUX} not found; skipping hoard runs"
 fi
+'
 
 # ===== Hoard on Mac =====
-# if [[ -f "${HOARD_LIB_MAC}" ]]; then
-#     exe="${ROOT}/bench_a_libc"
-#     if [[ -x "$exe" ]]; then
-#         echo "variant=hoard DYLD_INSERT_LIBRARIES=${HOARD_LIB_MAC}"
-#         for iters in "${ITERS_LIST[@]}"; do
-#             total_allocs=$((2 * NUM_ALLOCS * iters))
-#             echo "run num_iters=${iters} total_allocs=${total_allocs}"
-#             DYLD_INSERT_LIBRARIES="${HOARD_LIB_MAC}" \
-#             DYLD_FORCE_FLAT_NAMESPACE=1 \
-#             time "$exe" "${NUM_ALLOCS}" "${iters}"
-#             echo
-#         done
-#         echo
-#     else
-#         echo "WARNING bench_a_libc not found/executable; skipping hoard runs"
-#     fi
-# else
-#     echo "WARNING HOARD_LIB_MAC=${HOARD_LIB_MAC} not found; skipping hoard runs"
-# fi
+if [[ -f "${HOARD_LIB_MAC}" ]]; then
+    exe="${ROOT}/bench_a_libc"
+    if [[ -x "$exe" ]]; then
+        echo "variant=hoard DYLD_INSERT_LIBRARIES=${HOARD_LIB_MAC}"
+        for iters in "${ITERS_LIST[@]}"; do
+            total_allocs=$((2 * NUM_ALLOCS * iters))
+            echo "run num_iters=${iters} total_allocs=${total_allocs}"
+            DYLD_INSERT_LIBRARIES="${HOARD_LIB_MAC}" \
+            DYLD_FORCE_FLAT_NAMESPACE=1 \
+            time "$exe" "${NUM_ALLOCS}" "${iters}"
+            echo
+        done
+        echo
+    else
+        echo "WARNING bench_a_libc not found/executable; skipping hoard runs"
+    fi
+else
+    echo "WARNING HOARD_LIB_MAC=${HOARD_LIB_MAC} not found; skipping hoard runs"
+fi
