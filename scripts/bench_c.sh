@@ -5,7 +5,12 @@ exec 2>&1
 ROOT=".."
 VARIANTS=(libc v0)
 
-HOARD_LIB="/Users/taykim/Desktop/Hoard/build/libhoard.dylib"
+# ----- Hoard paths -----
+# Linux
+HOARD_LIB_LINUX="/path/to/libhoard.so"
+
+# macOS
+# HOARD_LIB_MAC="/Users/taykim/Desktop/Hoard/build/libhoard.dylib"
 
 # 1 producer + N consumers (we vary N)
 NUM_CONSUMERS_LIST=(1 2 4 8)
@@ -35,17 +40,16 @@ for variant in "${VARIANTS[@]}"; do
     echo
 done
 
-# Hoard runs using the libc binary with DYLD_INSERT_LIBRARIES (macOS)
-if [[ -f "${HOARD_LIB}" ]]; then
+# ===== Hoard on Linux =====
+if [[ -f "${HOARD_LIB_LINUX}" ]]; then
     exe="${ROOT}/bench_c_libc"
     if [[ -x "$exe" ]]; then
-        echo "variant=hoard DYLD_INSERT_LIBRARIES=${HOARD_LIB}"
+        echo "variant=hoard LD_PRELOAD=${HOARD_LIB_LINUX}"
         for c in "${NUM_CONSUMERS_LIST[@]}"; do
             threads=$((c + 1))
             total_allocs=$((NUM_ALLOCS * NUM_ITERS))
             echo "run consumers=${c} threads=${threads} total_allocs=${total_allocs}"
-            DYLD_INSERT_LIBRARIES="${HOARD_LIB}" \
-            DYLD_FORCE_FLAT_NAMESPACE=1 \
+            LD_PRELOAD="${HOARD_LIB_LINUX}" \
             time "$exe" "${c}" "${NUM_ALLOCS}" "${NUM_ITERS}"
             echo
         done
@@ -54,5 +58,27 @@ if [[ -f "${HOARD_LIB}" ]]; then
         echo "WARNING bench_c_libc not found/executable; skipping hoard runs"
     fi
 else
-    echo "WARNING HOARD_LIB=${HOARD_LIB} not found; skipping hoard runs"
+    echo "WARNING HOARD_LIB_LINUX=${HOARD_LIB_LINUX} not found; skipping hoard runs"
 fi
+
+# ===== Hoard on Mac =====
+# if [[ -f "${HOARD_LIB_MAC}" ]]; then
+#     exe="${ROOT}/bench_c_libc"
+#     if [[ -x "$exe" ]]; then
+#         echo "variant=hoard DYLD_INSERT_LIBRARIES=${HOARD_LIB_MAC}"
+#         for c in "${NUM_CONSUMERS_LIST[@]}"; do
+#             threads=$((c + 1))
+#             total_allocs=$((NUM_ALLOCS * NUM_ITERS))
+#             echo "run consumers=${c} threads=${threads} total_allocs=${total_allocs}"
+#             DYLD_INSERT_LIBRARIES="${HOARD_LIB_MAC}" \
+#             DYLD_FORCE_FLAT_NAMESPACE=1 \
+#             time "$exe" "${c}" "${NUM_ALLOCS}" "${NUM_ITERS}"
+#             echo
+#         done
+#         echo
+#     else
+#         echo "WARNING bench_c_libc not found/executable; skipping hoard runs"
+#     fi
+# else
+#     echo "WARNING HOARD_LIB_MAC=${HOARD_LIB_MAC} not found; skipping hoard runs"
+# fi
