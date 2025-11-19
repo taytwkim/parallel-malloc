@@ -49,7 +49,6 @@ compile_commands.json
 CMakeFiles/
 CMakeCache.txt
 cmake-build-*/
-Makefile
 build.ninja
 *.ninja
 meson-logs/

@@ -64,10 +64,9 @@ int main(int argc, char **argv) {
                     size_t sz = size_classes[i % NUM_CLASSES];
 
                     void *p = BENCH_ALLOC(sz);
+                    
                     if (!p) {
-                        fprintf(stderr,
-                                "producer: BENCH_ALLOC failed at iter=%zu i=%zu (size=%zu)\n",
-                                it, i, sz);
+                        fprintf(stderr, "producer: BENCH_ALLOC failed at iter=%zu i=%zu (size=%zu)\n", it, i, sz);
                         abort();
                     }
 
