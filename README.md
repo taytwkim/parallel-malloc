@@ -28,6 +28,9 @@ This will create executables like `bench_a_v0`, which means `bench_a` compiled w
 * Run Benchmarks
 
 We can pass arguments to the benchmarks. 
+
+If the benchmarks fail, it is probably because the default parameters are currently set at very high numbers. Please try with smaller inputs.
+
 ```
 ./bench_a_<variant> [num_allocs] [num_iters]
 ```

@@ -22,7 +22,7 @@ static const size_t size_classes[] = {16, 32, 64, 128, 256, 512, 1024};
 
 int main(int argc, char **argv) {
     int num_consumers = 1;        // default: 1 producer + 1 consumer
-    size_t num_allocs = 100000;   // per iteration
+    size_t num_allocs = 50000;   // per iteration
     size_t num_iters = 10;
 
     if (argc >= 2) num_consumers = atoi(argv[1]);

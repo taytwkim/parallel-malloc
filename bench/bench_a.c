@@ -19,7 +19,7 @@ static const size_t size_classes[] = {16, 32, 64, 128, 256, 512, 1024};
 #define NUM_CLASSES (sizeof(size_classes) / sizeof(size_classes[0]))
 
 int main(int argc, char **argv) {
-    size_t num_allocs = 100000;
+    size_t num_allocs = 50000;
     size_t num_iters = 10;
 
     if (argc >= 2) num_allocs = strtoull(argv[1], NULL, 10);

@@ -22,7 +22,7 @@ static const size_t size_classes[] = {16, 32, 64, 128, 256, 512, 1024};
 
 int main(int argc, char **argv) {
     int num_threads = 1;          // default threads
-    size_t num_allocs = 100000;   // per-thread churn array length
+    size_t num_allocs = 50000;    // per-thread churn array length
     size_t num_iters = 10;        // churn rounds
 
     if (argc >= 2) num_threads = atoi(argv[1]);
